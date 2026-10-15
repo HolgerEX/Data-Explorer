@@ -1,1 +1,6 @@
 
+This folder contains the unprocessed data as .rds or csv files.
+
+  A typical file may contain collums such as:
+
+datetime, value, depth_bot, detph_top, variable, unit  logger, Position, date, sourcefile, ... with some being numeric (value, depth ...) and some being strings (datetime, variable ...)  
