@@ -31,14 +31,15 @@ library(tibble)
 library(scales)
 library(plotly)
 
-# Uploads are stored in DATA_DIR (created on demand); datasets already
-# preprocessed in data/ are listed as well.
+# Uploads are stored in DATA_DIR (created on demand); .csv/.rds files placed in
+# data/ and data_input/ are listed as well.
 DATA_DIR  <- "data_processed"
-DATA_DIRS <- c(DATA_DIR, "data")
+DATA_DIRS <- c(DATA_DIR, "data", "data_input")
 if (!dir.exists(DATA_DIR)) dir.create(DATA_DIR, recursive = TRUE)
 
 # Shiny auto-loads R/*.R; source explicitly only when that did not happen.
 if (!exists("ingest_upload", mode = "function")) source("R/data_input.R", local = TRUE)
+if (!exists("load_timeseries_for_explorer", mode = "function")) source("R/preprocessing.R", local = TRUE)
 options(shiny.maxRequestSize = MAX_UPLOAD_MB * 1024^2)
 
 ID_CANDIDATES <- c("logger", "position", "source", "trm", "tree", "core_id",
@@ -71,8 +72,12 @@ TRM_RAMP <- list(D = c("red3", "#FB6A4A"),    # drought   = reds
 
 # -----------------------------------------------------------------------------
 load_dataset <- function(path) {
-  d <- readRDS(path)
-  if (!all(c("variable", "value") %in% names(d))) return(NULL)
+  d <- if (tolower(tools::file_ext(path)) == "rds") tryCatch(readRDS(path), error = function(e) NULL)
+  explorer_ready <- is.data.frame(d) && all(c("variable", "value") %in% names(d)) &&
+    any(c("datetime", "date") %in% names(d))
+  # Files in data_input/ may be arbitrary CSV/RDS: infer their schema instead.
+  if (!explorer_ready) d <- tryCatch(load_timeseries_for_explorer(path), error = function(e) NULL)
+  if (is.null(d) || !all(c("variable", "value") %in% names(d))) return(NULL)
   if (!"datetime" %in% names(d)) {
     if (!"date" %in% names(d)) return(NULL)
     d$datetime <- as.POSIXct(paste(d$date, "12:00:00"), tz = "Europe/Vienna")
@@ -250,7 +255,8 @@ server <- function(input, output, session) {
   files <- reactive({
     invalidateLater(30000, session)
     uploaded()
-    list.files(DATA_DIRS, pattern = "\\.rds$", full.names = TRUE)
+    list.files(DATA_DIRS[dir.exists(DATA_DIRS)], pattern = "\\.(rds|csv)$",
+               full.names = TRUE, ignore.case = TRUE)
   })
 
   # Accepted uploads are written to DATA_DIR, so they enter the same
