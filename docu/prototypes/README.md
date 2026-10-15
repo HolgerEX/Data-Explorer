@@ -15,3 +15,5 @@ build 13 summary levels 11.2 s; raw object 96 MB, summaries 50 MB. Larger sizes,
 parallelism, memory under concurrent sessions and rendering were not measured.
 
 Candidate tests: `Rscript docu/prototypes/test-candidate.R` (4 pass).
+
+Comparative benchmark of storage/cache and resolution alternatives: `bench_compare.R`, results and recommendation in `RESULTS.md`.

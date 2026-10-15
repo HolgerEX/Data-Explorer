@@ -4,6 +4,8 @@ Version: 0.1.0
 Authors@R: person("Data Explorer", "Maintainers", role = c("aut", "cre"))
 Description: A Shiny application for preprocessing and exploring environmental
     time-series datasets with gap-aware multi-resolution summaries.
+URL: https://github.com/HolgerEX/Data-Explorer
+BugReports: https://github.com/HolgerEX/Data-Explorer/issues
 License: MIT + file LICENSE
 Encoding: UTF-8
 Depends:
@@ -13,7 +15,6 @@ Imports:
     dplyr,
     ggplot2 (>= 3.4.0),
     plotly,
-    promises,
     purrr,
     readr,
     scales,
@@ -22,6 +23,5 @@ Imports:
     tibble,
     tidyr
 Suggests:
-    future,
     testthat (>= 3.0.0)
 Config/testthat/edition: 3
