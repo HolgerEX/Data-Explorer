@@ -30,10 +30,22 @@ immediately. Datasets in `data/*.rds` are listed too.
 testthat::test_dir("tests/testthat")
 ```
 
+## Files in `data/` and `data_input/`
+`.csv`/`.rds` files placed in `data/` or `data_input/` are listed next to uploads.
+Files already in explorer format are used as is; others go through
+`R/preprocessing.R` (`discover_data_files`, `infer_timeseries_schema`,
+`normalize_timeseries`, `detect_timeseries_gaps`), ported from
+`Sins-boku/Data-Explorer` `feature/preprocessing` (f3e6e2f). It infers the
+timestamp/value/variable columns, refuses ambiguous schemas with a clear error,
+treats `;` CSV files as decimal-comma (same as the upload), parses naive
+timestamps in `Europe/Vienna`, and flags gaps (> 5x the median cadence).
+
 ## Status
-See `docu/preprocessing.md`. Done: upload/validation/storage of CSV/RDS into the
-explorer's data path. Not done (awaiting design approval, see
-`docu/preprocessing.md` decision gates): multi-resolution preprocessing,
-storage/cache architecture, resolution-generation strategy, benchmarks, and the
-`Env-Plot` submodule integration (the submodule is empty in this checkout and
-its URL is SSH-only/private). Wide-format import is not implemented.
+See `docu/preprocessing.md`. Done: upload/validation/storage of CSV/RDS, the
+loader/schema/normalisation/gap code above and its tests. **Awaiting approval
+(decision gates)**: storage/cache architecture and multi-resolution strategy.
+The source branch's candidate implementation is kept, NOT wired into the app, in
+`docu/prototypes/` (with a benchmark script and candidate tests); see
+`docu/prototypes/README.md`. The `Env-Plot` submodule pointer is unchanged: its
+URL is SSH-only/private and was not retrievable, so the source branch's
+renderer integration was not ported. Wide-format import is not implemented.
