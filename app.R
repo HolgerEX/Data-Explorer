@@ -1,7 +1,8 @@
 # =============================================================================
 # app.R  -  Rosalia plotting app
 #
-# Reads the tidy .rds files in data_processed/ and builds every dropdown from
+# Reads the tidy .rds files in data_processed/ (and data/); data can be added
+# in the browser (CSV or RDS upload, see R/data_input.R) and builds every dropdown from
 # the data itself, so a new dataset saved there appears without editing this
 # file. A dataset only needs: a `variable` column, a `value` column, and
 # either `datetime` or `date`.
@@ -30,7 +31,15 @@ library(tibble)
 library(scales)
 library(plotly)
 
-DATA_DIR <- "data_processed"
+# Uploads are stored in DATA_DIR (created on demand); datasets already
+# preprocessed in data/ are listed as well.
+DATA_DIR  <- "data_processed"
+DATA_DIRS <- c(DATA_DIR, "data")
+if (!dir.exists(DATA_DIR)) dir.create(DATA_DIR, recursive = TRUE)
+
+# Shiny auto-loads R/*.R; source explicitly only when that did not happen.
+if (!exists("ingest_upload", mode = "function")) source("R/data_input.R", local = TRUE)
+options(shiny.maxRequestSize = MAX_UPLOAD_MB * 1024^2)
 
 ID_CANDIDATES <- c("logger", "position", "source", "trm", "tree", "core_id",
                    "probe_set", "depth_bottom", "depth_top", "station")
@@ -155,6 +164,9 @@ ui <- fluidPage(
       width = 3,
       # options scroll on their own, the plot stays put
       style = "height: calc(100vh - 90px); overflow-y: auto; position: sticky; top: 10px;",
+      fileInput("upload", "Add data (.csv or .rds, long format)",
+                accept = c(".csv", ".rds"), multiple = TRUE),
+      uiOutput("upload_msg"),
       selectInput("datasets", "Datasets", choices = NULL, multiple = TRUE),
       
       radioButtons("plotmode", "Plot type",
@@ -232,9 +244,39 @@ ui <- fluidPage(
 # -----------------------------------------------------------------------------
 server <- function(input, output, session) {
   
+  uploaded <- reactiveVal(0)
+  upload_results <- reactiveVal(list())
+
   files <- reactive({
     invalidateLater(30000, session)
-    list.files(DATA_DIR, pattern = "\\.rds$", full.names = TRUE)
+    uploaded()
+    list.files(DATA_DIRS, pattern = "\\.rds$", full.names = TRUE)
+  })
+
+  # Accepted uploads are written to DATA_DIR, so they enter the same
+  # files() -> input$datasets -> dat() path as any other dataset.
+  observeEvent(input$upload, {
+    up <- input$upload
+    res <- lapply(seq_len(nrow(up)), function(i)
+      c(list(name = up$name[i]), ingest_upload(up$datapath[i], up$name[i], DATA_DIR)))
+    upload_results(res)
+    uploaded(uploaded() + 1)
+    ok <- Filter(function(r) r$ok, res)
+    if (length(ok)) {
+      new <- vapply(ok, function(r) r$path, character(1))
+      ch <- setNames(files(), tools::file_path_sans_ext(basename(files())))
+      updateSelectInput(session, "datasets", choices = ch,
+                        selected = union(isolate(input$datasets), new))
+    }
+  })
+
+  output$upload_msg <- renderUI({
+    lapply(upload_results(), function(r) {
+      tagList(
+        div(style = paste0("color:", if (r$ok) "#2e7d32" else "#c62828", ";"),
+            if (r$ok) r$message else paste0(r$name, ": ", r$message)),
+        lapply(r$warnings, function(w) div(style = "color:#ef6c00;", w)))
+    })
   })
   
   observe({
