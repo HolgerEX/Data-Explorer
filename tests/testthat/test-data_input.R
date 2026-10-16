@@ -59,3 +59,15 @@ test_that("variable names like 't' are not guessed as logical", {
   f <- write_csv_tmp(c("datetime,variable,value", "2023-01-01 10:00:00,t,1"))
   expect_equal(readRDS(ingest_upload(f, "t.csv", tempfile())$path)$variable, "t")
 })
+
+test_that("wide-format files are rejected with a reshape hint, never guessed", {
+  f <- write_csv_tmp(c("datetime,temp,ph", "2023-01-01 00:00:00,1.5,7", "2023-01-01 01:00:00,2.5,7.1"))
+  r <- ingest_upload(f, "wide.csv", tempfile())
+  expect_false(r$ok); expect_match(r$message, "wide format"); expect_match(r$message, "temp, ph")
+})
+
+test_that("aliased variable columns are read as text without readr warnings", {
+  f <- write_csv_tmp(c("timestamp,parameter,val", "2023-01-01 00:00:00,001,1", "2023-01-01 01:00:00,001,2"))
+  expect_no_warning(r <- ingest_upload(f, "a.csv", tempfile()))
+  expect_true(r$ok); expect_equal(unique(readRDS(r$path)$variable), "001")
+})

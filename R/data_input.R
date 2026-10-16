@@ -62,10 +62,14 @@ read_dataset_file <- function(path, filename = basename(path)) {
     first <- readLines(path, n = 1, warn = FALSE)
     delim <- if (length(first) && lengths(regmatches(first, gregexpr(";", first))) >
                  lengths(regmatches(first, gregexpr(",", first)))) ";" else ","
+    header <- trimws(gsub("^\"|\"$", "", strsplit(first, delim, fixed = TRUE)[[1]]))
+    var_cols <- header[tolower(header) %in% c("variable", COLUMN_ALIASES$variable)]
+    col_spec <- do.call(readr::cols, c(
+      stats::setNames(rep(list(readr::col_character()), length(var_cols)), var_cols),
+      list(.default = readr::col_guess())))
     readr::read_delim(path, delim = delim, show_col_types = FALSE,
                       progress = FALSE, guess_max = 10000,
-                      col_types = readr::cols(variable = readr::col_character(),
-                                              .default = readr::col_guess()),
+                      col_types = col_spec,
                       locale = readr::locale(decimal_mark = if (delim == ";") "," else ".",
                                              grouping_mark = if (delim == ";") "." else ","))
   }
@@ -90,7 +94,15 @@ validate_dataset <- function(d, tz = "Europe/Vienna") {
   }
   if (!any(c("datetime", "date") %in% names(d)))
     errors <- c(errors, "Missing a time column: provide 'datetime' or 'date'.")
-  if (length(errors)) return(fail())
+  if (length(errors)) {
+    num <- setdiff(names(d)[vapply(d, is.numeric, NA)], c("variable", "value"))
+    if (!"variable" %in% names(d) && !"value" %in% names(d) &&
+        any(c("datetime", "date") %in% names(d)) && length(num))
+      errors <- c(errors, sprintf(
+        "This looks like wide format (numeric columns: %s). Wide files are not imported automatically because the variable names, units and metadata would have to be guessed; reshape to one row per measurement (columns datetime, variable, value), e.g. with tidyr::pivot_longer().",
+        paste(head(num, 10), collapse = ", ")))
+    return(fail())
+  }
 
   if (!is.numeric(d$value)) {
     v <- suppressWarnings(as.numeric(gsub(",", ".", as.character(d$value), fixed = TRUE)))

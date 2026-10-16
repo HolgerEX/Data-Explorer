@@ -48,4 +48,8 @@ The source branch's candidate implementation is kept, NOT wired into the app, in
 `docu/prototypes/` (with a benchmark script and candidate tests); see
 `docu/prototypes/README.md`. The `Env-Plot` submodule pointer is unchanged: its
 URL is SSH-only/private and was not retrievable, so the source branch's
-renderer integration was not ported. Wide-format import is not implemented.
+renderer integration was not ported. Wide-format files (one column per variable) are
+deliberately rejected with a message asking the user to reshape to long format,
+because variable names/units would otherwise have to be guessed; a column-picker UI
+needs a user decision. Benchmarks and the recommendation awaiting your approval:
+`docu/prototypes/RESULTS.md`. CI: `.github/workflows/ci.yml` (tests + app startup).
