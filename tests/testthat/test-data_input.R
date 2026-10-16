@@ -29,6 +29,46 @@ test_that("missing columns give actionable errors", {
   expect_false(r$ok); expect_match(r$message, "variable"); expect_match(r$message, "Found columns")
 })
 
+test_that("timestamped command logs are rejected without duplicated missing-column errors", {
+  f <- write_csv_tmp(c(
+    paste(
+      "datetime", "Command Index", "COM", "Command", "Response Data",
+      "Compared Data", "Response Time", "Compare Mode", "Result",
+      "Send Count", "Compared Error Count", "Timeout Count",
+      sep = ","
+    ),
+    paste(
+      "2024-01-01 12:00:00", "1", "COM3", "read", "ok", "ok", "0.1",
+      "exact", "pass", "1", "0", "0", sep = ","
+    )
+  ))
+  result <- ingest_upload(f, "Logger9_11_13.csv", tempfile())
+
+  expect_false(result$ok)
+  expect_match(result$message, "Missing measurement columns 'variable' and 'value'")
+  expect_match(result$message, "non-measurement log")
+  expect_match(result$message, "Numeric columns found")
+  expect_false(grepl("Missing required column", result$message, fixed = TRUE))
+})
+
+test_that("missing uploads and unreadable RDS files have actionable errors", {
+  missing <- ingest_upload(
+    tempfile(fileext = ".rds"),
+    "sm_phd.rds",
+    tempfile()
+  )
+  expect_false(missing$ok)
+  expect_match(missing$message, "no longer available")
+
+  invalid_rds <- tempfile(fileext = ".rds")
+  on.exit(unlink(invalid_rds))
+  writeLines("not an RDS file", invalid_rds)
+  unreadable <- ingest_upload(invalid_rds, "sm_phd.rds", tempfile())
+  expect_false(unreadable$ok)
+  expect_match(unreadable$message, "Could not open RDS file 'sm_phd.rds'")
+  expect_match(unreadable$message, "valid RDS")
+})
+
 test_that("bad extension, bad dates and non-numeric values are rejected", {
   f <- write_csv_tmp("a"); expect_false(ingest_upload(f, "x.xlsx", tempfile())$ok)
   f <- write_csv_tmp(c("datetime,variable,value", "foo,t,1", "bar,t,2"))
@@ -41,14 +81,22 @@ test_that("existing files are never overwritten and names are sanitised", {
   d <- tempfile(); f <- write_csv_tmp(c("date,variable,value", "2023-01-01,t,1"))
   a <- ingest_upload(f, "../../evil name.csv", d); b <- ingest_upload(f, "../../evil name.csv", d)
   expect_true(a$ok && b$ok); expect_false(a$path == b$path)
-  expect_equal(dirname(a$path), d)
+  expect_equal(
+    normalizePath(dirname(a$path), winslash = "/"),
+    normalizePath(d, winslash = "/")
+  )
 })
 
 test_that("stored output satisfies app.R load_dataset()", {
-  src <- readLines(file.path("..", "..", "app.R"))
-  s <- grep("^load_dataset <- function", src); e <- grep("^# include_variable", src) - 1
+  app <- parse(file.path("..", "..", "app.R"))
+  definition <- Filter(function(expr) {
+    if (!is.call(expr) || !identical(expr[[1]], as.name("<-")) ||
+        !identical(expr[[2]], as.name("load_dataset"))) return(FALSE)
+    TRUE
+  }, as.list(app))
+  expect_length(definition, 1)
   suppressPackageStartupMessages({library(dplyr); library(stringr); library(purrr)})
-  eval(parse(text = src[s:e]))
+  eval(definition[[1]])
   ID_CANDIDATES <- c("logger")
   f <- write_csv_tmp(c("datetime,variable,value,logger", "2023-05-31 14:00:00,temp,1.5,A"))
   r <- ingest_upload(f, "t.csv", tempfile())
@@ -63,7 +111,9 @@ test_that("variable names like 't' are not guessed as logical", {
 test_that("wide-format files are rejected with a reshape hint, never guessed", {
   f <- write_csv_tmp(c("datetime,temp,ph", "2023-01-01 00:00:00,1.5,7", "2023-01-01 01:00:00,2.5,7.1"))
   r <- ingest_upload(f, "wide.csv", tempfile())
-  expect_false(r$ok); expect_match(r$message, "wide format"); expect_match(r$message, "temp, ph")
+  expect_false(r$ok)
+  expect_match(r$message, "wide-format file")
+  expect_match(r$message, "temp, ph")
 })
 
 test_that("aliased variable columns are read as text without readr warnings", {

@@ -38,127 +38,56 @@ DATA_DIRS <- c(DATA_DIR, "data", "data_input")
 if (!dir.exists(DATA_DIR)) dir.create(DATA_DIR, recursive = TRUE)
 
 # Shiny auto-loads R/*.R; source explicitly only when that did not happen.
+if (!exists("env_plot_build_plot", mode = "function")) source("R/renderer.R", local = TRUE)
+if (!exists("load_exploratory_dataset", mode = "function")) source("R/dataset_profiles.R", local = TRUE)
 if (!exists("ingest_upload", mode = "function")) source("R/data_input.R", local = TRUE)
 if (!exists("load_timeseries_for_explorer", mode = "function")) source("R/preprocessing.R", local = TRUE)
 options(shiny.maxRequestSize = MAX_UPLOAD_MB * 1024^2)
 
-ID_CANDIDATES <- c("logger", "position", "source", "trm", "tree", "core_id",
-                   "probe_set", "depth_bottom", "depth_top", "station")
-
-# Soil colour ramp, keyed to the depth ITSELF: 10 cm = black, 20 cm = #3D1F00,
-# ... 100 cm = grey. A depth between two entries (SoPhy's 15/30/45) is
-# interpolated along the ramp instead of stealing the next colour.
-DEPTH_PAL <- c("#000000", "#3D1F00", "#5C3317", "#7B3F00", "#996633",
-               "#D2B48C", "#F5DEB3", "#FFFDD0", "#D9D9D9", "#808080")
-DEPTH_STEP <- 10   # cm per entry of DEPTH_PAL
-
-depth_cols <- function(x) {
-  x <- suppressWarnings(as.numeric(as.character(x)))
-  i <- pmin(pmax(x / DEPTH_STEP, 1), length(DEPTH_PAL))      # 10 cm -> 1st
-  out <- rep(NA_character_, length(x))
-  ok <- !is.na(i)
-  if (any(ok)) {
-    m <- grDevices::colorRamp(DEPTH_PAL)((i[ok] - 1) / (length(DEPTH_PAL) - 1))
-    out[ok] <- grDevices::rgb(m[, 1], m[, 2], m[, 3], maxColorValue = 255)
+load_dataset <- function(path, mapping = NULL) {
+  d <- if (tolower(tools::file_ext(path)) == "rds") {
+    tryCatch(readRDS(path), error = function(e) NULL)
   }
-  out
-}
-
-TRM_RAMP <- list(D = c("red3", "#FB6A4A"),    # drought   = reds
-                 R = c("royalblue", "#6BAED6"))    # reference = blues
-
-`%||%`   <- function(a, b) if (is.null(a)) b else a
-`%|""|%` <- function(a, b) if (is.null(a) || !nzchar(a)) b else a
-
-# -----------------------------------------------------------------------------
-load_dataset <- function(path) {
-  d <- if (tolower(tools::file_ext(path)) == "rds") tryCatch(readRDS(path), error = function(e) NULL)
-  explorer_ready <- is.data.frame(d) && all(c("variable", "value") %in% names(d)) &&
+  explorer_ready <- is.data.frame(d) &&
+    all(c("variable", "value") %in% names(d)) &&
     any(c("datetime", "date") %in% names(d))
-  # Files in data_input/ may be arbitrary CSV/RDS: infer their schema instead.
-  if (!explorer_ready) d <- tryCatch(load_timeseries_for_explorer(path), error = function(e) NULL)
-  if (is.null(d) || !all(c("variable", "value") %in% names(d))) return(NULL)
+  if (!explorer_ready) {
+    d <- tryCatch(load_timeseries_for_explorer(path), error = function(e) NULL)
+  }
+  source_columns <- if (is.data.frame(d)) names(d)
+  if (is.null(d) || !all(c("variable", "value") %in% names(d))) {
+    d <- tryCatch(load_exploratory_dataset(path, mapping = mapping), error = function(e) NULL)
+    if (is.null(d)) return(NULL)
+    source_columns <- attr(d, "source_columns")
+  }
+  mapping_used <- attr(d, "mapping")
+  exploratory_note <- attr(d, "time_is_index")
   if (!"datetime" %in% names(d)) {
     if (!"date" %in% names(d)) return(NULL)
     d$datetime <- as.POSIXct(paste(d$date, "12:00:00"), tz = "Europe/Vienna")
   }
+  profile_columns <- source_columns
   if (!"date" %in% names(d)) d$date <- as.Date(d$datetime)
   if (!"unit" %in% names(d)) d$unit <- NA_character_
-  # Keep the known id columns AND anything else that looks like a label, so a
-  # new reader's own columns (medium, probe, method, ...) can be used to split,
-  # facet and colour without being added to ID_CANDIDATES.
   drop <- c("dataset", "datetime", "date", "variable", "value", "unit",
             "source_file", "timestep_min")
   extra <- setdiff(names(d), c(ID_CANDIDATES, drop))
-  extra <- extra[!str_starts(extra, "flag_")]
-  extra <- extra[map_lgl(extra, function(v) {
-    x <- d[[v]]; n <- n_distinct(x, na.rm = TRUE)
+  extra <- extra[!stringr::str_starts(extra, "flag_")]
+  extra <- extra[purrr::map_lgl(extra, function(v) {
+    x <- d[[v]]
+    n <- dplyr::n_distinct(x, na.rm = TRUE)
     if (is.character(x) || is.factor(x) || is.logical(x)) return(n > 0 && n <= 100)
     is.numeric(x) && n > 0 && n <= 50 && all(x[!is.na(x)] %% 1 == 0)
   })]
   ids <- c(intersect(ID_CANDIDATES, names(d)), extra)
-  d %>%
-    mutate(dataset = tools::file_path_sans_ext(basename(path))) %>%
-    select(dataset, datetime, date, variable, value, unit, all_of(ids)) %>%
-    filter(!is.na(datetime))
-}
-
-# include_variable = FALSE is used for dual-isotope plots: there the two
-# isotopes are the x and y of ONE point, so the series label must NOT contain
-# the variable name or the same sample would end up in two different series
-# and the two isotopes could never be paired.
-make_series <- function(d, id_cols, include_variable = TRUE) {
-  if (!length(id_cols)) {
-    return(mutate(d, series = if (include_variable) variable else "all"))
-  }
-  d <- d %>%
-    unite("id_label", all_of(id_cols), sep = " | ", remove = FALSE, na.rm = TRUE)
-  if (!include_variable) {
-    return(mutate(d, series = if_else(id_label == "", "all", id_label)))
-  }
-  d %>% mutate(series = if_else(id_label == "", variable,
-                                paste0(variable, " (", id_label, ")")))
-}
-
-# colours keyed on the series present, following the chosen scheme
-build_colours <- function(d, scheme, manual = NULL) {
-  if (!"ckey" %in% names(d)) d$ckey <- d$series
-  s <- sort(unique(d$ckey))
-  
-  if (scheme == "depth" && "depth_bottom" %in% names(d)) {
-    key <- d %>% distinct(ckey, depth_bottom)
-    out <- depth_cols(key$depth_bottom)
-    names(out) <- key$ckey
-    # rows with no depth (stem probes, precipitation, ...) are not part of the
-    # soil ramp, so they get their own colours instead of all sharing one grey
-    if (any(is.na(out)))
-      out[is.na(out)] <- scales::hue_pal()(sum(is.na(out)))
-    out <- out[s]
-    names(out) <- s
-    return(out)
-  }
-  
-  if (scheme == "trm" && "trm" %in% names(d)) {
-    key <- d %>% distinct(ckey, trm) %>% arrange(ckey)
-    out <- setNames(rep("grey50", nrow(key)), key$ckey)
-    for (tr in names(TRM_RAMP)) {
-      idx <- which(key$trm == tr)
-      if (!length(idx)) next
-      out[idx] <- colorRampPalette(TRM_RAMP[[tr]])(length(idx))
-    }
-    return(out[s])
-  }
-  
-  if (scheme == "date") {
-    # colour is keyed on the sampling date itself, not the series, so the
-    # legend lists dates (one entry per campaign) rather than series names
-    lev <- sort(unique(d$ckey))
-    return(setNames(rainbow(length(lev), end = 0.85), lev))
-  }
-  
-  if (scheme == "manual" && !is.null(manual)) return(manual[s])
-  
-  setNames(scales::hue_pal()(length(s)), s)
+  out <- d |>
+    dplyr::mutate(dataset = tools::file_path_sans_ext(basename(path))) |>
+    dplyr::select(dataset, datetime, date, variable, value, unit, dplyr::all_of(ids)) |>
+    dplyr::filter(!is.na(datetime))
+  attr(out, "source_columns") <- profile_columns
+  attr(out, "time_is_index") <- isTRUE(exploratory_note)
+  attr(out, "mapping") <- mapping_used
+  out
 }
 
 # -----------------------------------------------------------------------------
@@ -169,10 +98,11 @@ ui <- fluidPage(
       width = 3,
       # options scroll on their own, the plot stays put
       style = "height: calc(100vh - 90px); overflow-y: auto; position: sticky; top: 10px;",
-      fileInput("upload", "Add data (.csv or .rds, long format)",
+      fileInput("upload", "Add data (.csv or .rds; any table with numeric columns)",
                 accept = c(".csv", ".rds"), multiple = TRUE),
       uiOutput("upload_msg"),
       selectInput("datasets", "Datasets", choices = NULL, multiple = TRUE),
+      uiOutput("profile_ui"),
       
       radioButtons("plotmode", "Plot type",
                    c("Time series"   = "ts",
@@ -295,8 +225,10 @@ server <- function(input, output, session) {
   # between campaigns", so colouring by sampling date is the sensible default
   # there. Switching plot type flips it; the user can still override.
   observeEvent(input$plotmode, {
+    saved <- isolate(active_profile()$settings$scheme)
     updateSelectInput(session, "scheme",
-                      selected = if (identical(input$plotmode, "depth")) "date" else "auto")
+                      selected = saved %||%
+                        if (identical(input$plotmode, "depth")) "date" else "auto")
   }, ignoreInit = TRUE)
   
   observeEvent(input$facet_by, {                                 
@@ -322,18 +254,127 @@ server <- function(input, output, session) {
   
   dat <- reactive({
     req(input$datasets)
-    out <- compact(map(input$datasets, possibly(load_dataset, NULL)))
+    override <- mapping_override()
+    out <- compact(map(input$datasets, function(path) {
+      mapping <- if (identical(override$path, path)) override$mapping
+      possibly(load_dataset, NULL)(path, mapping)
+    }))
     validate(need(length(out) > 0,
-                  "None of those files are in long format (need variable + value)."))
-    bind_rows(out)
+                  "None of those files could be read as a table with numeric columns."))
+    res <- bind_rows(out)
+    if (length(out) == 1L) {
+      attr(res, "source_columns") <- attr(out[[1]], "source_columns")
+      attr(res, "mapping") <- attr(out[[1]], "mapping")
+      attr(res, "time_is_index") <- attr(out[[1]], "time_is_index")
+    }
+    res
+  })
+
+  # --- saved profiles (mapping + plot settings, stored in Env-Plot) ---------
+  mapping_override <- reactiveVal(NULL)
+  profile_version <- reactiveVal(0)
+  active_profile <- reactiveVal(NULL)
+
+  observeEvent(list(dat(), profile_version()), {
+    cols <- attr(dat(), "source_columns")
+    profile <- if (length(cols)) {
+      tryCatch(match_dataset_profile(cols, read_dataset_profiles()),
+               error = function(e) NULL)
+    }
+    active_profile(profile)
+    s <- profile$settings
+    if (is.null(s)) return()
+    if (!is.null(s$scheme)) updateSelectInput(session, "scheme", selected = s$scheme)
+    if (!is.null(s$plotmode)) updateRadioButtons(session, "plotmode", selected = s$plotmode)
+    if (!is.null(s$geom)) updateRadioButtons(session, "geom", selected = s$geom)
+    for (id in c("alpha", "lwd", "psize"))
+      if (!is.null(s[[id]])) updateSliderInput(session, id, value = s[[id]])
+    if (!is.null(s$basesize)) updateNumericInput(session, "basesize", value = s$basesize)
+    if (!is.null(s$interactive)) updateCheckboxInput(session, "interactive", value = s$interactive)
+    for (id in c("title", "xlab", "ylab"))
+      if (!is.null(s[[id]])) updateTextInput(session, id, value = s[[id]])
+  })
+
+  output$profile_ui <- renderUI({
+    req(input$datasets)
+    d <- dat()
+    profile <- active_profile()
+    exploratory <- !is.null(attr(d, "mapping"))
+    mapping_ui <- NULL
+    if (exploratory && length(input$datasets) == 1L) {
+      raw <- tryCatch(read_raw_table(input$datasets), error = function(e) NULL)
+      if (is.data.frame(raw)) {
+        mapping <- attr(d, "mapping")
+        numeric_cols <- names(raw)[vapply(raw, is.numeric, logical(1))]
+        mapping_ui <- tagList(
+          helpText("Basic plot of a table outside the documented format. Adjust the columns if needed:"),
+          selectInput("map_time", "Time column",
+                      c("(row number)" = "", names(raw)),
+                      selected = mapping$time_column),
+          selectInput("map_values", "Value columns", names(raw), multiple = TRUE,
+                      selected = mapping$value_columns),
+          actionButton("map_apply", "Apply columns")
+        )
+      }
+    }
+    save_ui <- if (length(input$datasets) == 1L && length(attr(d, "source_columns"))) {
+      tagList(
+        textInput("profile_name", "Profile name",
+                  value = profile$name %||% tools::file_path_sans_ext(basename(input$datasets))),
+        actionButton("profile_save", "Save plot config to Env-Plot")
+      )
+    }
+    tagList(
+      if (!is.null(profile))
+        div(style = "color:#2e7d32;",
+            sprintf("Saved profile '%s' applied (%.0f%% column match).",
+                    profile$name, 100 * profile$match_score)),
+      mapping_ui,
+      save_ui,
+      hr()
+    )
+  })
+
+  observeEvent(input$map_apply, {
+    req(length(input$datasets) == 1L)
+    mapping_override(list(
+      path = input$datasets,
+      mapping = list(time_column = input$map_time %||% "",
+                     value_columns = input$map_values %||% character())
+    ))
+  })
+
+  observeEvent(input$profile_save, {
+    d <- dat()
+    settings <- setNames(lapply(PROFILE_SETTING_IDS, function(id) input[[id]]),
+                         PROFILE_SETTING_IDS)
+    profile <- build_dataset_profile(
+      name = input$profile_name,
+      columns = attr(d, "source_columns"),
+      mapping = attr(d, "mapping"),
+      settings = settings
+    )
+    path <- tryCatch(save_dataset_profile(profile),
+                     error = function(e) {
+                       showNotification(conditionMessage(e), type = "error")
+                       NULL
+                     })
+    if (!is.null(path)) {
+      showNotification(
+        sprintf("Saved to %s. Commit and push the Env-Plot checkout to share it.", path),
+        type = "message", duration = 10)
+      profile_version(profile_version() + 1)
+    }
   })
   
   # --- variable pickers ------------------------------------------------------
   output$var_ui <- renderUI({
     if (identical(input$plotmode, "dual")) return(NULL)
     v <- sort(unique(dat()$variable))
+    sel <- intersect(active_profile()$settings$vars, v)
+    if (!length(sel)) sel <- head(v, 1)
     selectInput("vars", "Variables", choices = v, multiple = TRUE,
-                selected = head(v, 1))
+                selected = sel)
   })
   
   output$dual_ui <- renderUI({
@@ -364,7 +405,8 @@ server <- function(input, output, session) {
     ids <- intersect(ID_CANDIDATES, names(dat()))
     ids <- ids[map_lgl(ids, ~ n_distinct(dat()[[.x]], na.rm = TRUE) > 1)]
     selectInput("ids", "Split series by", choices = ids, multiple = TRUE,
-                selected = intersect(c("logger", "trm"), ids))
+                selected = if (length(saved <- intersect(active_profile()$settings$ids, ids)))
+                  saved else intersect(c("logger", "trm"), ids))
   })
   
   # one tick box per level of every "Split series by" column, so single trees,
@@ -579,7 +621,7 @@ server <- function(input, output, session) {
   build_plot <- reactive({
     d <- plot_dat()
     validate(need(nrow(d) > 0, "No data for that selection."))
-    
+
     miss <- setdiff(input$vars %||% character(), unique(d$variable))
     if (length(miss) && !identical(input$plotmode, "dual"))
       showNotification(
@@ -587,265 +629,14 @@ server <- function(input, output, session) {
                " with the current filters (date range, depths, dates ticked)",
                " - that panel is missing."),
         type = "warning", duration = 10)
-    
-    # a blank box stays NA, which every limit argument below reads as "auto"
-    nn <- function(x) if (is.null(x) || !is.finite(x)) NA_real_ else as.numeric(x)
-    per_col_x <- FALSE   # TRUE once the x range is set per panel column
-    
-    cols <- build_colours(d, input$scheme,
-                          if (identical(input$scheme, "manual")) manual_cols() else NULL)
-    
-    add_geoms <- function(p) {
-      p + switch(input$geom,
-                 line  = geom_line(alpha = input$alpha, linewidth = input$lwd),
-                 point = geom_point(alpha = input$alpha, size = input$psize),
-                 both  = list(geom_line(alpha = input$alpha, linewidth = input$lwd),
-                              geom_point(alpha = input$alpha, size = input$psize)),
-                 col   = geom_col(aes(fill = series), alpha = input$alpha,
-                                  position = "identity", colour = NA))
-    }
-    
-    # ---------------- dual isotope ----------------
-    if (identical(input$plotmode, "dual")) {
-      req(input$xvar, input$yvar)
-      idc <- c("dataset", "series", "ckey", "date", intersect(ID_CANDIDATES, names(d)))
-      w <- d %>%
-        select(all_of(idc), variable, value) %>%
-        distinct(across(all_of(c(idc, "variable"))), .keep_all = TRUE) %>%
-        pivot_wider(names_from = variable, values_from = value)
-      validate(need(all(c(input$xvar, input$yvar) %in% names(w)) &&
-                      sum(!is.na(w[[input$xvar]]) & !is.na(w[[input$yvar]])) > 0,
-                    "No samples have both variables. Try adding core_id under 'Split series by'."))
-      
-      p <- ggplot(w, aes(.data[[input$xvar]], .data[[input$yvar]], colour = ckey))
-      if (isTRUE(input$gmwl))
-        p <- p + geom_abline(slope = 8, intercept = 10,
-                             linetype = "dashed", colour = "grey40")
-      if (isTRUE(input$lmwl) && !is.null(input$lmwl_slope) && !is.null(input$lmwl_int))
-        p <- p + geom_abline(slope = input$lmwl_slope, intercept = input$lmwl_int,
-                             linetype = "dotdash", colour = "steelblue")
-      p <- p + geom_point(alpha = input$alpha, size = input$psize)
-      
-      # --- ordinary least squares fit through the plotted points -------------
-      fit_txt <- NULL
-      if (!identical(input$fitline, "none")) {
-        fml <- as.formula(paste0("`", input$yvar, "` ~ `", input$xvar, "`"))
-        
-        fit_one <- function(dd, lab) {
-          dd <- dd[!is.na(dd[[input$xvar]]) & !is.na(dd[[input$yvar]]), ]
-          if (nrow(dd) < 3) return(NULL)
-          m  <- lm(fml, data = dd)
-          cf <- coef(m)
-          tibble(series = lab,
-                 slope = cf[2], intercept = cf[1],
-                 r2 = summary(m)$r.squared, n = nrow(dd))
-        }
-        
-        fits <- if (identical(input$fitline, "all")) {
-          fit_one(w, "all points")
-        } else {
-          bind_rows(lapply(split(w, w$series),
-                           function(dd) fit_one(dd, dd$series[1])))
-        }
-        
-        if (!is.null(fits) && nrow(fits) > 0) {
-          if (identical(input$fitline, "all")) {
-            p <- p + geom_abline(slope = fits$slope[1], intercept = fits$intercept[1],
-                                 colour = "black", linewidth = 0.6)
-          } else {
-            p <- p + geom_smooth(method = "lm", se = FALSE,
-                                 formula = y ~ x, linewidth = 0.6)
-          }
-          if (isTRUE(input$fit_eq)) {
-            fit_txt <- paste(sprintf("%s: y = %.3fx %+.3f  (R2 = %.3f, n = %d)",
-                                     fits$series, fits$slope, fits$intercept,
-                                     fits$r2, fits$n), collapse = "\n")
-          }
-        }
-      }
-      
-      p <- p + labs(x = input$xlab %|""|% input$xvar,
-                    y = input$ylab %|""|% input$yvar,
-                    subtitle = fit_txt)
-      
-      # ---------------- depth profile ----------------
-    } else if (identical(input$plotmode, "depth")) {
-      validate(need("depth_bottom" %in% names(d),
-                    "The selected datasets have no depth_bottom column."))
-      d <- filter(d, !is.na(depth_bottom))
-      validate(need(nrow(d) > 0, "No rows with a depth."))
-      
-      # A depth profile line must never run across two different cores or two
-      # different sampling dates, so the line grouping is built here from the
-      # finest identity available, independently of "Split series by".
-      grp_cols <- intersect(c("dataset", "core_id", "tree", "trm", "position",
-                              "logger", "probe_set", "variable"), names(d))
-      d <- d %>%
-        mutate(.grp = paste(series, format(date, "%Y-%m-%d"),
-                            !!!syms(grp_cols), sep = "_"))
-      
-      # ---- per-column x range ------------------------------------------
-      # ggplot has one x range per panel only when scales are free, and it
-      # takes it from the data, so the range is forced here: rows outside the
-      # wanted range are dropped and an invisible geom_blank pins each panel
-      # to the exact limits. Column 1 uses X min/max, the rest use the
-      # "(right col.)" pair; a blank box on either side means "auto".
-      fb0 <- input$facet_by %||% ""
-      xl_l <- c(nn(input$xmin),   nn(input$xmax))
-      xl_r <- c(nn(input$xmin_r), nn(input$xmax_r))
-      if (nzchar(fb0) && !all(is.na(xl_r))) {
-        per_col_x <- TRUE
-        lev  <- if (is.factor(d[[fb0]])) levels(droplevels(d[[fb0]]))
-        else as.character(sort(unique(d[[fb0]])))
-        ncol_f <- if (identical(fb0, "tree")) ceiling(length(lev) / 2)
-        else ceiling(sqrt(length(lev)))
-        col_of <- ((seq_along(lev) - 1) %% ncol_f) + 1
-        lo <- ifelse(col_of == 1, xl_l[1], xl_r[1])
-        hi <- ifelse(col_of == 1, xl_l[2], xl_r[2])
-        key <- match(as.character(d[[fb0]]), lev)
-        d <- d[(is.na(lo[key]) | d$value >= lo[key]) &
-                 (is.na(hi[key]) | d$value <= hi[key]), ]
-        validate(need(nrow(d) > 0, "No data inside that x range."))
-        pin <- tibble(lev = rep(lev, 2), value = c(lo, hi),
-                      depth_bottom = d$depth_bottom[1]) %>%
-          filter(!is.na(value))
-        # the pinning layer must carry the facet column in exactly the same
-        # type as the data, or a factor gets coerced to text and the panels
-        # fall back into alphabetical order (10, 4, 6, 7)
-        pin$lev <- if (is.factor(d[[fb0]]))
-          factor(pin$lev, levels = levels(d[[fb0]])) else
-            methods::as(pin$lev, class(d[[fb0]])[1])
-        names(pin)[1] <- fb0
-      }
-      
-      p <- ggplot(d, aes(value, depth_bottom, colour = ckey, group = .grp)) +
-        scale_y_reverse(breaks = sort(unique(d$depth_bottom))) +
-        labs(x = input$xlab %|""|% "value",
-             y = input$ylab %|""|% "Depth (cm)")
-      p <- p + switch(input$geom,
-                      line  = geom_path(alpha = input$alpha, linewidth = input$lwd),
-                      point = geom_point(alpha = input$alpha, size = input$psize),
-                      both  = list(geom_path(alpha = input$alpha, linewidth = input$lwd),
-                                   geom_point(alpha = input$alpha, size = input$psize)),
-                      col   = geom_point(alpha = input$alpha, size = input$psize))
-      if (per_col_x)
-        p <- p + geom_blank(data = pin, aes(value, depth_bottom),
-                            inherit.aes = FALSE)
-      fb <- input$facet_by %||% ""
-      if (nzchar(fb)) {
-        p <- p + facet_wrap(as.formula(paste("~", fb)), scales = "free_x",
-                            nrow = if (identical(fb, "tree")) 2 else NULL)
-      } else if (n_distinct(d$variable) > 1) {
-        p <- p + facet_wrap(~ variable, nrow = 1, scales = "free_x")
-      }
-      
-      # ---------------- time series, secondary axis ----------------
-    } else if (identical(input$mode, "sec") && !is.null(input$sec_var) &&
-               input$sec_var %in% d$variable && n_distinct(d$variable) > 1) {
-      
-      left  <- filter(d, variable != input$sec_var)
-      right <- filter(d, variable == input$sec_var)
-      validate(need(nrow(left) > 0 && nrow(right) > 0,
-                    "Need at least one variable on each axis."))
-      lr <- range(left$value, na.rm = TRUE); rr <- range(right$value, na.rm = TRUE)
-      sf <- diff(lr) / diff(rr); if (!is.finite(sf) || sf == 0) sf <- 1
-      sh <- lr[1] - rr[1] * sf
-      
-      d2 <- bind_rows(left, mutate(right, value = value * sf + sh))
-      p <- add_geoms(ggplot(d2, aes(datetime, value, colour = ckey, group = series))) +
-        scale_y_continuous(
-          name = input$ylab %|""|% paste(setdiff(input$vars, input$sec_var),
-                                         collapse = ", "),
-          sec.axis = sec_axis(~ (. - sh) / sf,
-                              name = (input$ylab2 %||% "") %|""|% input$sec_var)) +
-        labs(x = input$xlab %|""|% NULL)
-      
-      # ---------------- time series, one axis or facets ----------------
-    } else {
-      p <- add_geoms(ggplot(d, aes(datetime, value, colour = ckey, group = series))) +
-        labs(x = input$xlab %|""|% NULL,
-             y = input$ylab %|""|% {
-               u <- unique(na.omit(d$unit)); if (length(u) == 1) u else "value"
-             })
-      if (identical(input$mode, "facet")) {
-        labs_map <- setNames(
-          map_chr(input$vars, function(v) {
-            val <- input[[paste0("flab_", make.names(v))]]
-            if (is.null(val) || !nzchar(val)) v else val
-          }), input$vars)
-        if (identical(input$strippos, "left")) {
-          # Putting the strip on the left and outside the axis gives each panel
-          # what looks like its own y-axis title - ggplot itself allows only one
-          # y title per plot, so this is the standard way to label panels
-          # separately (permille on one, % on another).
-          p <- p + facet_wrap(~ variable, ncol = 1, scales = "free_y",
-                              strip.position = "left",
-                              labeller = as_labeller(labs_map)) +
-            labs(y = NULL) +
-            theme(strip.background = element_blank(),
-                  strip.placement  = "outside")
-        } else {
-          p <- p + facet_wrap(~ variable, ncol = 1, scales = "free_y",
-                              labeller = as_labeller(labs_map))
-        }
-      }
-    }
-    
-    leg_name <- if (identical(input$scheme, "date")) "Sampling date"
-    else if (identical(input$scheme, "trm") && identical(input$plotmode, "depth"))
-      "Treatment | sampling date" else NULL
-    p <- p + scale_colour_manual(values = cols, name = leg_name)
-    if (identical(input$geom, "col") && identical(input$plotmode, "ts"))
-      p <- p + scale_fill_manual(values = cols, name = NULL)
-    
-    z <- zoom()
-    if (!is.null(z) && identical(input$plotmode, "ts")) {
-      p <- p + coord_cartesian(
-        xlim = as.POSIXct(z$x, origin = "1970-01-01",
-                          tz = attr(d$datetime, "tzone") %||% "UTC"),
-        ylim = z$y, expand = FALSE)
-    } else if (!is.null(z)) {
-      p <- p + coord_cartesian(xlim = z$x, ylim = z$y)
-    }
-    
-    # Manual axis range. A blank box stays NA, which coord_cartesian reads as
-    # "auto", so one side can be fixed and the other left free. coord_cartesian
-    # only zooms the viewport, so limits apply to EVERY panel of a facet even
-    # with scales = "free", and no data is dropped.
-    xl <- if (per_col_x) c(NA_real_, NA_real_) else c(nn(input$xmin), nn(input$xmax))
-    yl <- c(nn(input$ymin), nn(input$ymax))
-    if (!all(is.na(c(xl, yl)))) {
-      p <- p + coord_cartesian(xlim = if (all(is.na(xl))) NULL else xl,
-                               ylim = if (all(is.na(yl))) NULL else yl)
-    }
-    
-    bs <- input$basesize %||% 12
-    
-    # A bottom legend is laid out in ONE row by default, so with long keys it
-    # runs off the side of the saved file. Wrap it over several columns,
-    # estimated from the export width, the font size and the longest label.
-    nkey <- n_distinct(d$ckey)
-    lc <- input$legcols %||% 0
-    if (!is.finite(lc) || lc < 1) {
-      lab_cm <- max(nchar(as.character(unique(d$ckey)))) * 0.020 * bs + 1
-      lc <- max(1, min(nkey, floor((input$w %||% 25) / lab_cm)))
-    }
-    # the legend title sits to the LEFT of the keys by default and eats the
-    # width the keys need, so it is moved on top
-    p <- p + guides(
-      colour = guide_legend(ncol = lc, byrow = TRUE, title.position = "top"),
-      fill   = guide_legend(ncol = lc, byrow = TRUE, title.position = "top"))
-    
-    p +
-      labs(title = if (nzchar(input$title)) input$title else NULL) +
-      theme_bw(base_size = bs) +
-      theme(legend.position = "bottom",
-            legend.text = element_text(size = bs),
-            axis.text   = element_text(size = bs),
-            axis.title  = element_text(size = bs),
-            strip.text  = element_text(size = bs))
+
+    env_plot_build_plot(
+      d,
+      input,
+      manual_colors = if (identical(input$scheme, "manual")) manual_cols() else NULL,
+      zoom = zoom()
+    )
   })
-  
   # Static ggplot by default (brush zoom + exact export). With the box ticked a
   # time series goes to plotly instead: hovermode "closest" reports the nearest
   # POINT only, rather than a running readout like dygraphs.
